@@ -3,6 +3,12 @@
 A quick orientation so you (or an AI assistant) can pick this project back up at any time,
 even if the original chat is gone. For deeper setup/deploy details, see `README.md`.
 
+**Current development location (September 19, 2026):** `~/Developer/carb-counter`.
+The original Dropbox folder is retained. The local `experiment/usual-foods` branch is
+an opt-in experiment awaiting phone review; see `USUAL-FOODS-EXPERIMENT.md` for the
+fixture-only preview, checks, and rollback. Use `node preview-usual-foods.js` for this
+experiment's safe preview; the ordinary server below uses the real configuration.
+
 ---
 
 ## What this is

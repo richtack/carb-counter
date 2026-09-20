@@ -4,3 +4,15 @@ supabase/.temp/
 
 # macOS metadata
 .DS_Store
+
+# Local experiments, credentials, and generated output
+.env*
+*.pem
+*.key
+node_modules/
+netlify-publish/
+backups/
+exports/
+test-results/
+.codex/
+.agents/

@@ -1,6 +1,6 @@
 // Caches the app shell so the PWA opens instantly and works offline.
 // (Logging/saving still needs a connection — that talks to Supabase.)
-const CACHE = "ncc-v29";
+const CACHE = "ncc-v30-usual-foods";
 const SHELL = [
   "./",
   "./index.html",
@@ -9,6 +9,7 @@ const SHELL = [
   "./voice-logging.js",
   "./label-scanning.js",
   "./log-later.js",
+  "./usual-foods.js",
   "./config.js",
   "./manifest.webmanifest",
   "./icons/icon-192.png",

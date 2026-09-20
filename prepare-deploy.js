@@ -14,6 +14,7 @@ const files = [
   "voice-logging.js",
   "label-scanning.js",
   "log-later.js",
+  "usual-foods.js",
   "config.js",
   "manifest.webmanifest",
   "service-worker.js",

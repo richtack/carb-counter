@@ -56,6 +56,7 @@ const state = {
   foods: [],
   entries: [],            // entries for state.date (this person's only)
   favorites: [],          // this person's favorite food ids (personal, not shared)
+  usual: null,            // local experiment preferences + frozen membership, never daily entries
   target: 20,
   categoryOrder: [],      // user-defined category display order
   trackCalories: false,   // calorie tracking on/off (synced)
@@ -94,6 +95,7 @@ async function boot() {
 
   // Identity + header come from config (this deployment is one specific person).
   state.person = window.NCC_CONFIG.PERSON || "rich";
+  usualSession();
   applyDisplayName(window.NCC_CONFIG.DISPLAY_NAME);
 
   try {
@@ -122,6 +124,7 @@ async function boot() {
   }
 
   renderAll();
+  refreshUsualFoods(); // Background read: must not delay daily logging or Shortcut review.
   await handleVoiceLaunch();
   await handleLabelLaunch();
   setupReturnRefresh();
@@ -173,6 +176,57 @@ async function loadEntries() {
     .select("*").eq("person", state.person).eq("log_date", state.date).order("created_at");
   if (error) throw error;
   state.entries = data || [];
+}
+
+function usualSession() {
+  if (!state.usual || state.usual.person !== state.person) {
+    state.usual?.controller?.abort();
+    state.usual = { person: state.person, ...window.NCCUsualFoods.readPreferences(localStorage, state.person),
+      status: "idle", ids: [], request: 0, controller: null };
+  }
+  return state.usual;
+}
+
+async function refreshUsualFoods({ freshSession = false } = {}) {
+  const session = usualSession();
+  if (freshSession) {
+    session.controller?.abort();
+    session.request++;
+    session.status = "idle";
+    session.ids = [];
+  }
+  if (!session.enabled || session.status !== "idle") return;
+  const request = ++session.request;
+  const controller = new AbortController();
+  session.controller = controller;
+  session.status = "loading";
+  renderFoodGrid();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  const current = () => state.person === session.person && state.usual === session && session.request === request;
+  try {
+    const window = globalThis.NCCUsualFoods.windowFor();
+    const history = await globalThis.NCCUsualFoods.loadHistory(db, session.person, window, { signal: controller.signal });
+    if (!current()) return;
+    session.ids = globalThis.NCCUsualFoods.rank(state.foods, history, session.person, window);
+    session.status = "ready";
+  } catch (_) {
+    if (!current()) return;
+    session.ids = [];
+    session.status = "error";
+  } finally {
+    clearTimeout(timer);
+    if (current()) { session.controller = null; renderFoodGrid(); }
+  }
+}
+
+function setUsualPreference(changes) {
+  const session = usualSession();
+  Object.assign(session, changes);
+  if (!window.NCCUsualFoods.writePreferences(localStorage, state.person, session)) {
+    toast("Layout changed for now; this browser couldn’t remember it");
+  }
+  renderFoodGrid();
+  refreshUsualFoods();
 }
 
 function pendingManageKey() {
@@ -367,10 +421,21 @@ async function refreshAfterReturn() {
 }
 
 function setupReturnRefresh() {
+  let awayAt = document.visibilityState === "hidden" ? Date.now() : null;
+  const onReturn = () => {
+    if (document.visibilityState === "hidden") return;
+    if (awayAt !== null && Date.now() - awayAt >= 15 * 60 * 1000) {
+      refreshUsualFoods({ freshSession: true });
+    }
+    awayAt = null;
+    refreshAfterReturn();
+  };
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") refreshAfterReturn();
+    if (document.visibilityState === "hidden") { if (awayAt === null) awayAt = Date.now(); }
+    else onReturn();
   });
-  window.addEventListener("pageshow", (e) => { if (e.persisted) refreshAfterReturn(); });
+  window.addEventListener("pagehide", () => { if (awayAt === null) awayAt = Date.now(); });
+  window.addEventListener("pageshow", (e) => { if (e.persisted) onReturn(); });
 }
 
 /* ============================================================
@@ -674,10 +739,35 @@ function updateFoodViewSeg() {
   $$("#foodViewSeg button").forEach((b) => b.classList.toggle("active", b.dataset.fview === state.foodView));
 }
 
+function usualFoodsHTML() {
+  const session = usualSession();
+  const foods = session.mode === "favorites" ? state.foods.filter(isFav) :
+    session.ids.map((id) => state.foods.find((food) => food.id === id)).filter(Boolean).sort(window.NCCUsualFoods.byName);
+  let content;
+  if (session.mode === "favorites") {
+    content = foods.length ? foods.map(foodCardHTML).join("") : '<p class="usual-note">No favorites yet. Add stars in My Foods.</p>';
+  } else if (session.status === "error") {
+    content = '<p class="usual-note" role="status">Most used is unavailable right now</p><button class="wide-btn usual-fallback" data-usual-mode="favorites">Show Favorites</button>';
+  } else if (session.status !== "ready") {
+    content = '<p class="usual-note" role="status">Loading Most used…</p><button class="wide-btn usual-fallback" data-usual-mode="favorites">Show Favorites</button>';
+  } else {
+    content = foods.length ? foods.map(foodCardHTML).join("") : '<p class="usual-note">Your usual foods will appear as you log meals</p><button class="wide-btn usual-fallback" data-usual-mode="favorites">Show Favorites</button>';
+  }
+  return `<section class="usual-foods" aria-labelledby="usual-heading">
+    <div class="cat-head" id="usual-heading">Usual foods</div>
+    <div class="seg usual-modes" aria-label="Usual foods selection">
+      <button type="button" data-usual-mode="most" aria-pressed="${session.mode === "most"}" class="${session.mode === "most" ? "active" : ""}">Most used</button>
+      <button type="button" data-usual-mode="favorites" aria-pressed="${session.mode === "favorites"}" class="${session.mode === "favorites" ? "active" : ""}">Favorites</button>
+    </div>
+    <div class="usual-grid">${content}</div>
+  </section>`;
+}
+
 function renderFoodGrid() {
   const grid = $("#foodGrid");
   if (!state.foods.length) {
     grid.innerHTML = `<p class="empty-note">No foods yet. Go to <b>My Foods</b> and add your first one →</p>`;
+    renderJump(); renderMiniTally();
     return;
   }
   updateFoodViewSeg();
@@ -686,16 +776,19 @@ function renderFoodGrid() {
   if (q) {
     const hits = state.foods.filter((f) => f.name.toLowerCase().includes(q) || (f.category || "").toLowerCase().includes(q));
     grid.innerHTML = hits.length ? hits.map(foodCardHTML).join("") : `<p class="empty-note">No matches for “${esc(state.search)}”.</p>`;
+    renderJump(); renderMiniTally();
     return;
   }
   // A–Z view: every food, flat, alphabetical
   if (state.foodView === "az") {
     grid.innerHTML = [...state.foods].sort((a, b) => a.name.localeCompare(b.name)).map(foodCardHTML).join("");
+    renderJump(); renderMiniTally();
     return;
   }
   let html = "";
   const favs = state.foods.filter(isFav);
-  if (favs.length) html += `<div class="cat-head">★ Favorites</div>` + favs.map(foodCardHTML).join("");
+  if (usualSession().enabled) html += usualFoodsHTML();
+  else if (favs.length) html += `<div class="cat-head">★ Favorites</div>` + favs.map(foodCardHTML).join("");
 
   // group ALL foods by category (favorites appear here too, in addition to the top section)
   const cats = {};
@@ -717,6 +810,7 @@ function renderFoodGrid() {
     }
   }
   grid.innerHTML = html;
+  renderJump(); renderMiniTally();
 }
 
 function toggleCat(cat) {
@@ -1815,6 +1909,8 @@ function openSettings() {
 
     <div class="settings-section">
       <h3>Layout</h3>
+      <label class="check"><input type="checkbox" id="s-usual" ${usualSession().enabled ? "checked" : ""} /> Try Usual foods</label>
+      <p class="field-help">For ${esc(window.NCC_CONFIG.DISPLAY_NAME || state.person)} on this device. Turn off to restore the original Favorites layout.</p>
       <div class="stack-btns">
         <button class="wide-btn" id="s-reorder">↕&#xFE0E; Reorder categories</button>
       </div>
@@ -1843,6 +1939,7 @@ function openSettings() {
     </div>
   </div>`);
   m.querySelector("[data-close]").onclick = closeModal;
+  m.querySelector("#s-usual").onchange = (e) => setUsualPreference({ enabled: e.target.checked });
   m.querySelector("#s-save").onclick = () => {
     setTarget($("#s-target").value);
     if (state.calReady) setCalorieSettings($("#s-trackcal").checked, Number($("#s-calgoal").value) || state.calorieTarget);
@@ -1908,6 +2005,12 @@ function wireUI() {
 
   // category tiles: tap to open (auto-closes the previously open one)
   $("#foodGrid").addEventListener("click", (e) => {
+    const mode = e.target.closest("[data-usual-mode]");
+    if (mode) {
+      setUsualPreference({ mode: mode.dataset.usualMode });
+      $(`.usual-modes [data-usual-mode="${mode.dataset.usualMode}"]`)?.focus();
+      return;
+    }
     const cb = e.target.closest(".cat-tile");
     if (cb) toggleCat(cb.dataset.cat);
   });
@@ -2043,7 +2146,7 @@ function setupJump() {
 function renderMiniTally() {
   const el = $("#miniTally");
   if (!el) return;
-  const show = !modalOpen && state.tab === "log" && !progVisible;
+  const show = !modalOpen && state.tab === "log" && !progVisible && !usualCardsAtBottom();
   el.classList.toggle("hidden", !show);
   if (!show) return;
   const total = dayTotal();
@@ -2056,10 +2159,19 @@ function renderJump() {
   if (!btn) return;
   const scrollable = document.documentElement.scrollHeight > window.innerHeight + 40;
   const count = state.entries.length + dayPending().length;
-  const show = !modalOpen && state.tab === "log" && count > 0 && scrollable;
+  const show = !modalOpen && state.tab === "log" && count > 0 && scrollable && !usualCardsAtBottom();
   btn.classList.toggle("hidden", !show);
   if (!show) return;
   btn.innerHTML = isAtBottom() ? "↑ Top" : `↓ Logged <span class="jb-count">${count}</span>`;
+}
+
+// Keep the floating pills from covering the experiment's card names or tap targets.
+function usualCardsAtBottom() {
+  const grid = $(".usual-grid");
+  if (!grid) return false;
+  const rect = grid.getBoundingClientRect();
+  const safeBottom = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--safe-bottom")) || 0;
+  return rect.top < window.innerHeight && rect.bottom > window.innerHeight - safeBottom - 96;
 }
 
 /* ---------- toast / undo ---------- */
