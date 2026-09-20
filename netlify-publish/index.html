@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+  <meta name="theme-color" content="#16a34a" />
+  <title>Rich's Carb Counter</title>
+
+  <!-- PWA / iOS home-screen -->
+  <link rel="manifest" href="manifest.webmanifest" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Net Carbs" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <link rel="icon" href="icons/icon-192.png" />
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Full-width app chrome bar -->
+  <header id="appbar" class="appbar hidden">
+    <img class="ab-icon" src="icons/icon-192.png" alt="" />
+    <span class="ab-title" id="appTitle">Carb Counter</span>
+  </header>
+
+  <!-- Setup screen: shown until config.js has real Supabase values -->
+  <div id="setup" class="setup hidden">
+    <div class="setup-card">
+      <h1>Almost there 🥑</h1>
+      <p>This app needs your Supabase project to store food and logs.</p>
+      <ol>
+        <li>Create a free project at <b>supabase.com</b>.</li>
+        <li>In the dashboard: <b>SQL Editor → New query</b>, paste <code>supabase-setup.sql</code>, click <b>Run</b>.</li>
+        <li><b>Project Settings → API</b>: copy your <b>Project URL</b> and <b>anon public</b> key.</li>
+        <li>Open <code>config.js</code>, paste both values, save, and reload.</li>
+      </ol>
+      <p class="muted" id="setup-detail"></p>
+    </div>
+  </div>
+
+  <!-- Main app -->
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <div class="date-nav">
+        <button class="icon-btn" id="prevDay" aria-label="Previous day">‹</button>
+        <button class="date-label" id="dateLabel">Today</button>
+        <button class="icon-btn" id="nextDay" aria-label="Next day">›</button>
+      </div>
+      <button class="icon-btn" id="gearBtn" aria-label="Settings">⚙</button>
+    </header>
+
+    <!-- Daily target progress -->
+    <section class="progress-wrap" id="progressWrap" role="button" tabindex="0" aria-label="View summary">
+      <div class="progress-numbers">
+        <span class="total" id="dayTotal">0</span>
+        <span class="of">/ <span id="targetLabel">20</span> g net carbs</span>
+        <span class="remaining" id="remainingLabel"></span>
+        <span class="prog-go" aria-hidden="true">›</span>
+      </div>
+      <div class="bar"><div class="bar-fill" id="barFill"></div></div>
+      <div class="cal-line hidden" id="calLine"></div>
+      <div class="pending-day-line hidden" id="pendingDayLine"></div>
+      <button type="button" class="pending-all-btn hidden" id="pendingAllBtn"></button>
+    </section>
+
+    <!-- Tabs -->
+    <nav class="tabs">
+      <button class="tab active" data-tab="log">Log</button>
+      <button class="tab" data-tab="foods">My Foods</button>
+    </nav>
+
+    <!-- LOG TAB -->
+    <main id="tab-log" class="tab-panel active">
+      <input type="search" id="foodSearch" class="search" placeholder="Search my foods…" />
+      <div class="log-actions">
+        <div class="seg" id="foodViewSeg">
+          <button type="button" data-fview="cats" class="active">Categories</button>
+          <button type="button" data-fview="az">A–Z</button>
+        </div>
+        <div class="quick-actions">
+          <button id="logLaterBtn" class="oneoff-btn log-later-btn">⏱ Log later</button>
+          <button id="oneOffBtn" class="oneoff-btn">+ One-off</button>
+        </div>
+      </div>
+      <p class="section-label">Tap to log · hold for a portion</p>
+      <div id="foodGrid" class="food-grid"></div>
+
+      <div class="log-head">
+        <h2 class="entries-heading">Logged <span id="entriesCount" class="pill"></span></h2>
+        <div class="seg" id="logViewSeg">
+          <button type="button" data-view="time" class="active">Time</button>
+          <button type="button" data-view="summary">Summary</button>
+        </div>
+      </div>
+      <div class="seg seg-sub hidden" id="summaryGroupSeg">
+        <button type="button" data-group="category" class="active">By category</button>
+        <button type="button" data-group="flat">Merged</button>
+      </div>
+      <div id="entriesList" class="entries-list"></div>
+    </main>
+
+    <!-- FOODS TAB -->
+    <section id="tab-foods" class="tab-panel">
+      <button class="primary-btn" id="addFoodBtn">+ Add a food</button>
+      <div id="foodEditorList" class="editor-list"></div>
+    </section>
+  </div>
+
+  <!-- Floating mini daily tally (bottom-left) -->
+  <div id="miniTally" class="mini-tally hidden" aria-hidden="true"></div>
+
+  <!-- Floating jump-to-log button -->
+  <button id="jumpBtn" class="jump-btn hidden" aria-label="Jump to log"></button>
+
+  <!-- Toast (undo) -->
+  <div id="toast" class="toast hidden"><span id="toastMsg"></span><button id="toastAction"></button></div>
+
+  <!-- Modal host -->
+  <div id="modalRoot" class="modal-root hidden"></div>
+
+  <!-- Supabase client (loaded from CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="config.js"></script>
+  <script src="voice-logging.js"></script>
+  <script src="label-scanning.js"></script>
+  <script src="log-later.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

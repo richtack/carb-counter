@@ -1,0 +1,6 @@
+# Local project configuration
+config.js
+supabase/.temp/
+
+# macOS metadata
+.DS_Store

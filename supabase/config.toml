@@ -1,0 +1,5 @@
+project_id = "gmxbcdppjxoijuuwanxr"
+
+[functions.log-later]
+verify_jwt = false
+
