@@ -67,11 +67,23 @@
     <nav class="tabs">
       <button class="tab active" data-tab="log">Log</button>
       <button class="tab" data-tab="foods">My Foods</button>
+      <button class="tab" data-tab="meals">My Meals</button>
     </nav>
 
     <!-- LOG TAB -->
     <main id="tab-log" class="tab-panel active">
-      <input type="search" id="foodSearch" class="search" placeholder="Search my foods…" />
+      <div class="search-wrap">
+        <input type="search" id="foodSearch" class="search" placeholder="Search my foods…" aria-label="Search foods to log" aria-controls="foodGrid" aria-describedby="foodSearchStatus" />
+        <button type="button" id="clearFoodSearch" class="search-clear hidden" aria-label="Clear food search">×</button>
+      </div>
+      <p id="foodSearchStatus" class="search-status" role="status" aria-live="polite"></p>
+      <section id="savedMealsSection" class="saved-meals" aria-labelledby="savedMealsHeading">
+        <div class="saved-meals-head">
+          <h2 id="savedMealsHeading">Saved meals</h2>
+          <button type="button" id="manageMealsBtn">Manage</button>
+        </div>
+        <div id="mealQuickList" class="meal-quick-list"></div>
+      </section>
       <div class="log-actions">
         <div class="seg" id="foodViewSeg">
           <button type="button" data-fview="cats" class="active">Categories</button>
@@ -97,12 +109,31 @@
         <button type="button" data-group="flat">Merged</button>
       </div>
       <div id="entriesList" class="entries-list"></div>
+      <div class="day-status">
+        <button type="button" id="dayIncompleteBtn" class="day-incomplete-btn" aria-pressed="false" aria-describedby="dayIncompleteNote" disabled>Loading day flag…</button>
+        <p id="dayIncompleteNote" class="day-incomplete-note" aria-live="polite">Use when the day ended with food missing from the log.</p>
+      </div>
     </main>
 
     <!-- FOODS TAB -->
     <section id="tab-foods" class="tab-panel">
+      <div class="search-wrap">
+        <input type="search" id="foodEditorSearch" class="search" placeholder="Search my foods…" aria-label="Search My Foods" aria-controls="foodEditorList" />
+        <button type="button" id="clearFoodEditorSearch" class="search-clear hidden" aria-label="Clear My Foods search">×</button>
+      </div>
       <button class="primary-btn" id="addFoodBtn">+ Add a food</button>
-      <div id="foodEditorList" class="editor-list"></div>
+      <p id="foodEditorCount" class="section-label" role="status" aria-live="polite"></p>
+      <div class="editor-browser">
+        <div id="foodEditorList" class="editor-list"></div>
+        <nav id="foodAlphabet" class="food-alphabet hidden" aria-label="Jump to foods by letter"></nav>
+      </div>
+    </section>
+
+    <!-- MEALS TAB -->
+    <section id="tab-meals" class="tab-panel">
+      <button type="button" class="primary-btn" id="addMealBtn">+ Add a meal</button>
+      <p class="section-label">Save combinations of foods and their usual servings.</p>
+      <div id="mealEditorList" class="meal-editor-list"></div>
     </section>
   </div>
 

@@ -22,7 +22,14 @@
     id: `entry-${i}-${j}`, food_id: foods[i].id, name: foods[i].name, qty: 1, net_carbs: foods[i].net_carbs,
     person, log_date: today, created_at: new Date().toISOString(), calories: 100,
   });
-  const tables = { foods, entries, settings: ["rich", "gen"].map((p) => ({
+  const saved_meals = fixture === "empty" ? [] : [{
+    id: "meal-1", person, name: "Usual breakfast",
+    items: [{ food_id: foods[5].id, qty: 2 }, { food_id: foods[6].id, qty: 1 }],
+  }, {
+    id: "meal-2", person, name: "Simple lunch",
+    items: [{ food_id: foods[3].id, qty: 1 }, { food_id: foods[7].id, qty: 1 }],
+  }];
+  const tables = { foods, entries, saved_meals, day_log_status: [], settings: ["rich", "gen"].map((p) => ({
     person: p, daily_target: 30, category_order: ["Meals", "Snacks"],
     favorites: foods.slice(0, fixture === "six" ? 6 : 12).map((f) => f.id), track_calories: false,
   })) };
@@ -37,7 +44,7 @@
     range(from, to) { this.offset = from; this.end = to; return this; }
     abortSignal(signal) { this.signal = signal; return this; }
     insert(value) { this.action = "insert"; this.value = value; return this; }
-    upsert(value) { return this.insert(value); }
+    upsert(value, options) { this.conflict = options?.onConflict?.split(","); return this.insert(value); }
     update(value) { this.action = "update"; this.value = value; return this; }
     delete() { this.action = "delete"; return this; }
     single() { this.one = true; return this; }
@@ -49,7 +56,12 @@
         let rows = (tables[this.table] || []).filter((row) => this.filters.every((f) => f(row)));
         if (this.action === "insert") {
           rows = (Array.isArray(this.value) ? this.value : [this.value]).map((row) => ({ id: `saved-${++sequence}`, created_at: new Date().toISOString(), ...row }));
-          tables[this.table].push(...rows);
+          rows = rows.map((row) => {
+            const existing = this.conflict && tables[this.table].find((item) => this.conflict.every((k) => item[k] === row[k]));
+            if (existing) return Object.assign(existing, row);
+            tables[this.table].push(row);
+            return row;
+          });
         } else if (this.action === "update") rows.forEach((row) => Object.assign(row, this.value));
         else if (this.action === "delete") tables[this.table] = tables[this.table].filter((row) => !rows.includes(row));
         if (this.sortKey) rows.sort((a, b) => String(a[this.sortKey]).localeCompare(String(b[this.sortKey])));

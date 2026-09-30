@@ -8,6 +8,13 @@ backed by a Supabase cloud database so it syncs across all your devices.
   with `− / +`, delete with undo, and flip through past days with `‹ ›`.
 - **My Foods tab** — add / edit / delete your foods live (name, serving size, net carbs,
   category, favorite). Optional “total carbs − fiber − sugar alcohols” calculator.
+- **My Meals tab** — save a combination of foods and usual serving amounts. Choose it from
+  **Saved meals** on the Log tab, adjust its components for this occasion, then log them together.
+  The meal template is personal to each household member and syncs across their devices.
+
+At a desk, press `/` to search foods on the Log tab, use `↑`/`↓` to select a match, and press
+`Enter` to log one serving. The search clears and stays focused so you can type the next food.
+`Shift+Enter` opens portions instead. Press `?` outside a text field for the full shortcut list.
 
 Favorites float to the top; the rest group by category so a growing list stays scannable.
 
@@ -93,6 +100,25 @@ there's no build step.)
   the `log-later` Edge Function. This does not retroactively secure foods, logs, or settings.
 - **History & editing past days:** use the `‹ ›` arrows on the Log tab to view or back-log any
   day. Tap the date to jump back to Today.
+- **Saved meals:** the migration in [`supabase/migrations/20260930212500_saved_meals.sql`](supabase/migrations/20260930212500_saved_meals.sql)
+  was applied to the shared project on September 30, 2026. New installations need this schema
+  before deploying the app. Meals use current
+  values from their foods when logged; the resulting ordinary entries keep those values even if
+  a food or meal is later edited. A deleted food must be replaced in affected meal templates
+  before those meals can be logged. Meal templates use the same household access model as foods
+  and settings; the person field is a filter, not authentication.
+- **Incomplete days:** at the bottom of the day's log, tap **Flag day as incomplete** when a day ended
+  with food missing from the log. Tap again to remove the flag. Available for today and past
+  dates, separately for each person; adding food later does not clear it automatically.
+  Flags sync through `day_log_status` and do not change nutrition totals or Log later reminders.
+  Existing installations need `supabase/migrations/20260921151458_day_log_status.sql` before
+  deploying the updated app. The table uses the same household access model as entries/settings.
+- **Analyzing exports:** the full-log CSV includes `day_log_incomplete` (`true`/`false`) and
+  `row_type`. False means *not flagged*, not confirmed complete. Flagged dates with no foods
+  get a `day_status` row with blank nutrition fields (unknown, not zero); food rows have
+  `row_type=food`. Exclude flagged dates from analyses that need complete daily intake.
+  This manual flag is separate from unresolved Log later reminders. Exports load all pages
+  and stop with an error if either entries or flags cannot be fetched.
 - **Editing a food** never changes past logs — each entry stores the carbs it had when you
   logged it.
 - **Regenerating icons:** `node generate-icons.js` (no dependencies needed).

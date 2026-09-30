@@ -24,6 +24,8 @@ Supabase cloud database so it syncs across all your devices.
 ## Everyday things you can do IN THE APP (no code needed)
 - **Add / edit / delete a food:** *My Foods* tab → "+ Add a food" (or tap a food to edit).
 - **Log food:** *Log* tab → tap a food (one serving) or **hold** it for a portion (0.25×–4×).
+- **Save and log a meal:** *My Meals* → **Add a meal** to save a combination. Choose it under
+  **Saved meals** on the Log tab, adjust foods or servings, then tap **Log meal**.
 - **Save a reminder:** *Log* tab → **Log later** → type a short note. Amber reminders stay unknown until replaced with real foods.
 - **Change your daily target:** ⚙ gear (top-right) → Daily net-carb target.
 - **Reorder categories:** ⚙ gear → Reorder categories.
@@ -31,6 +33,9 @@ Supabase cloud database so it syncs across all your devices.
 - **Edit a logged time:** in the *Log* tab's **Time** view, tap the time on an entry.
 - **See a consolidated day:** tap the big total number, or use the **Time | Summary** toggle.
 - **Look at past days:** the ◀ ▶ arrows next to the date.
+- **Mark a day with missing food:** at the bottom of the day's log, tap **Flag day as incomplete**.
+  Tap again to clear it. This syncs per person/date and appears in CSV exports, including
+  flagged dates with no food entries. Unflagged does not mean verified complete.
 
 ---
 
@@ -52,12 +57,21 @@ node serve.js        # then open http://localhost:8765
    into the manual deploy area. Do not deploy the whole source folder; it contains private notes and tests.
 4. Reopen the app on your phone. Your data is in Supabase, so nothing is lost on redeploy.
 
+The saved-meals migration (`supabase/migrations/20260930212500_saved_meals.sql`)
+was run in the shared Supabase project on September 30, 2026. The table, four
+policies, and app grants were verified. No additional database step is needed
+for this saved-meals deployment.
+
 ---
 
 ## Your cloud database (Supabase)
 - **Dashboard:** https://supabase.com/dashboard → project `gmxbcdppjxoijuuwanxr`
 - **Your keys** live in `config.js` (already filled in). The schema (tables) is in `supabase-setup.sql`.
-- Tables: `foods` (your food list), `entries` (each logged item), `settings` (target + category order).
+- Tables: `foods` (your food list), `entries` (each logged item), `settings` (target + category order),
+  and, after its migration, `saved_meals` (personal reusable combinations).
+- `day_log_status` stores the manual incomplete-day flag per person/date. Its migration was
+  applied to the shared database on September 21, 2026 and verified without retaining test rows.
+  The matching app update is prepared in `netlify-publish`; deploy it to enable the control.
 - Log later adds private `pending_food_items` and `log_later_credentials` tables plus a separately deployed Supabase Edge Function. A Netlify drag-and-drop does not deploy that backend.
 - You can even view/edit your data by hand in the dashboard → **Table Editor**.
 

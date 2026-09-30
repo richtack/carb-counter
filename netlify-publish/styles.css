@@ -84,6 +84,12 @@ button { font: inherit; color: inherit; cursor: pointer; border: none; backgroun
 .pending-day-line { color: var(--amber); font-size: 13px; font-weight: 650; margin-top: 7px; }
 .pending-all-btn { color: var(--amber); font-size: 13px; font-weight: 750; margin-top: 7px; padding: 3px 0; text-align: left; }
 .pending-all-btn:active { opacity: .6; }
+.day-status { margin: 24px 2px 60px; padding-top: 16px; border-top: 1px solid var(--line); }
+.day-incomplete-btn { min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font-size: 14px; text-align: left; }
+.day-incomplete-btn[aria-pressed="true"] { color: var(--amber); border-color: var(--amber); background: color-mix(in srgb, var(--amber) 8%, var(--bg)); }
+.day-incomplete-btn:disabled { opacity: .6; cursor: default; }
+.day-incomplete-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.day-incomplete-note { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
 
 /* ---------- Tabs ---------- */
 .tabs { display: flex; gap: 6px; background: var(--card); padding: 4px; border-radius: 14px; margin: 16px 0 4px; border: 1px solid var(--line); }
@@ -93,12 +99,56 @@ button { font: inherit; color: inherit; cursor: pointer; border: none; backgroun
 .tab-panel.active { display: block; }
 
 /* ---------- Search ---------- */
+.search-wrap { position: relative; margin-bottom: 10px; }
 .search {
-  width: 100%; padding: 12px 14px; border-radius: 12px; background: var(--card);
-  border: 1px solid var(--line); color: var(--text); font-size: 16px; margin-bottom: 10px;
+  width: 100%; padding: 12px 52px 12px 14px; border-radius: 12px; background: var(--card);
+  border: 1px solid var(--line); color: var(--text); font-size: 16px;
 }
 .search::placeholder { color: var(--muted); }
+.search::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+.search-clear {
+  position: absolute; right: 2px; top: 50%; transform: translateY(-50%);
+  width: 44px; height: 44px; border-radius: 10px; color: var(--text);
+  display: grid; place-items: center; font-size: 26px; line-height: 1;
+}
+.search-clear:active { background: var(--card-2); }
+.search-clear:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.search-status { margin: -3px 2px 9px; color: var(--muted); font-size: 12px; }
+.search-status:empty { display: none; }
 .section-label { color: var(--muted); font-size: 12.5px; margin: 4px 2px 10px; }
+
+/* ---------- Saved meals ---------- */
+.saved-meals { margin: 2px 0 15px; }
+.saved-meals-head { display: flex; align-items: center; justify-content: space-between; margin: 0 2px 7px; }
+.saved-meals-head h2 { font-size: 14px; margin: 0; }
+.saved-meals-head button { color: var(--accent); font-size: 13px; font-weight: 700; padding: 5px 8px; }
+.meal-quick-list { display: flex; gap: 8px; overflow-x: auto; padding: 2px 3px 6px; scrollbar-width: thin; }
+.meal-quick-card { flex: 0 0 min(210px, 67vw); min-height: 74px; display: flex; flex-direction: column; justify-content: center;
+  gap: 4px; text-align: left; padding: 10px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+.meal-quick-card:active { background: var(--card-2); }
+.meal-quick-card:focus-visible, .meal-editor-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.meal-quick-card:disabled, .meal-editor-actions button:disabled { opacity: .55; cursor: default; }
+.meal-card-name { font-weight: 700; }
+.meal-card-meta, .meal-note { color: var(--muted); font-size: 12px; }
+.meal-note { margin: 0 3px; padding: 6px 0; }
+.meal-editor-list { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; padding-bottom: 70px; }
+.meal-editor-card { display: flex; gap: 10px; align-items: center; padding: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 13px; }
+.meal-editor-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; overflow-wrap: anywhere; }
+.meal-editor-content span, .meal-editor-content small { color: var(--muted); font-size: 12px; }
+.meal-editor-actions { display: flex; flex-direction: column; gap: 5px; }
+.meal-editor-actions button { min-width: 58px; min-height: 36px; padding: 5px 9px; border: 1px solid var(--line); border-radius: 9px; font-size: 13px; }
+.meal-editor-actions .meal-log-btn { background: var(--green); border-color: var(--green); color: white; font-weight: 700; }
+.meal-modal { max-height: min(94dvh, 820px); overflow-y: auto; }
+.meal-dialog-intro { font-size: 13px; margin: -5px 0 14px; }
+.meal-dialog-rows { display: flex; flex-direction: column; gap: 7px; }
+.meal-dialog-row { display: flex; align-items: end; gap: 7px; }
+.meal-dialog-row .field { flex: 1; min-width: 0; margin-bottom: 0; }
+.meal-dialog-row .meal-row-qty { flex: 0 0 88px; }
+.meal-dialog-row select { min-width: 0; }
+.meal-remove-row { flex: 0 0 32px; height: 46px; color: var(--muted); font-size: 23px; }
+.meal-add-row { margin-top: 10px; min-height: 40px; }
+.meal-dialog-total { margin: 14px 0 3px; color: var(--accent); font-weight: 800; }
+.meal-dialog-status { min-height: 19px; margin-bottom: 13px; }
 
 /* ---------- Food grid (quick add) ---------- */
 .food-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
@@ -109,6 +159,8 @@ button { font: inherit; color: inherit; cursor: pointer; border: none; backgroun
   transition: transform .06s ease, background .15s;
 }
 .food-btn:active { transform: scale(.96); background: var(--card-2); }
+.food-btn:focus-visible, .food-btn.keyboard-selected { outline: 2px solid var(--accent); outline-offset: 2px; }
+.food-btn.keyboard-selected { background: color-mix(in srgb, var(--accent) 12%, var(--card)); }
 .food-btn.fav { border-color: #3f6212; }
 .food-btn .fav-star { position: absolute; top: 7px; right: 9px; font-size: 11px; color: var(--amber); }
 .food-btn .fname { font-weight: 650; font-size: 15px; line-height: 1.2; padding-right: 12px; }
@@ -146,6 +198,26 @@ button { font: inherit; color: inherit; cursor: pointer; border: none; backgroun
 .cat-tile .ct-count { color: var(--muted); font-size: 12px; font-weight: 700; }
 .cat-head.open-cat { color: var(--accent); }
 
+/* Opt-in section only: category tiles and legacy cards keep their existing layout. */
+.usual-foods { grid-column: 1 / -1; min-width: 0; container-type: inline-size; }
+.usual-foods .cat-head { margin: 8px 2px 6px; }
+.usual-modes { margin-bottom: 8px; }
+.usual-foods .usual-modes button { min-height: 32px; font-size: .8125rem; }
+.usual-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.usual-grid .food-btn { min-width: 0; padding: 6px 8px; gap: 2px; overflow-wrap: anywhere; }
+.usual-grid .fname { font-size: .9375rem; padding-right: 0; }
+.usual-grid .fav .fname { padding-right: .9rem; }
+.usual-grid .fav-star { top: 7px; right: 6px; font-size: .6875rem; }
+.usual-grid .frow { flex-direction: column; align-items: stretch; gap: 2px; line-height: 1.2; }
+.usual-grid .fserv { font-size: .75rem; }
+.usual-grid .fcarb { font-size: .9375rem; white-space: normal; }
+.usual-grid .fcarb small { font-size: .6875rem; }
+.usual-note { grid-column: 1 / -1; color: var(--muted); margin: 4px 0; font-size: .875rem; }
+.usual-fallback { grid-column: 1 / -1; justify-self: start; }
+@container (max-width: 21rem) {
+  .usual-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 /* log action row (hint + one-off) */
 .log-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 4px 2px 10px; }
 .log-actions .section-label { margin: 0; }
@@ -179,7 +251,7 @@ button { font: inherit; color: inherit; cursor: pointer; border: none; backgroun
   border: 1px solid var(--line); border-radius: 13px; padding: 10px 12px;
 }
 .entry.time-gap { margin-top: 16px; }
-.entry .ename { font-weight: 600; }
+.entry .ename { font-weight: 600; overflow-wrap: anywhere; }
 .entry .emeta { color: var(--muted); font-size: 12.5px; }
 .entry .emeta .etime { color: var(--text); font-weight: 600; cursor: pointer; }
 .entry .emeta .etime:active { opacity: .55; }
@@ -208,7 +280,20 @@ button { font: inherit; color: inherit; cursor: pointer; border: none; backgroun
 /* ---------- Foods editor ---------- */
 .primary-btn { width: 100%; background: var(--green); color: #fff; font-weight: 700; padding: 14px; border-radius: 13px; font-size: 16px; }
 .primary-btn:active { background: var(--green-dim); }
-.editor-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.editor-browser { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; }
+.editor-letter { margin: 10px 2px 0; color: var(--muted); font-size: 18px; scroll-margin-top: calc(var(--safe-top) + 64px); }
+.editor-letter:focus { outline: none; }
+.editor-letter:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.food-alphabet {
+  position: sticky; top: calc(var(--safe-top) + 64px); margin-top: 24px;
+  max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - 150px);
+  overflow-y: auto; border-radius: 14px; background: var(--bg-2); padding: 5px 0;
+}
+.food-alphabet button { display: block; width: 28px; min-height: 18px; padding: 1px 0; color: var(--accent); font-size: 11px; font-weight: 750; }
+.food-alphabet button:disabled { color: var(--muted); opacity: .35; cursor: default; }
+.food-alphabet button:active { background: var(--green-dim); }
+.food-alphabet button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 4px; }
+.editor-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; padding-bottom: 76px; }
 .editor-row { display: flex; align-items: center; gap: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 13px; padding: 10px 12px; }
 .editor-row .er-main { flex: 1; min-width: 0; }
 .editor-row .er-name { font-weight: 650; }
@@ -227,6 +312,10 @@ button { font: inherit; color: inherit; cursor: pointer; border: none; backgroun
 @media (min-width: 520px) { .modal { border-radius: 20px; } }
 @keyframes slideup { from { transform: translateY(30px); opacity: .6; } to { transform: none; opacity: 1; } }
 .modal h2 { margin: 0 0 14px; font-size: 19px; }
+.shortcut-modal { max-height: 92dvh; overflow-y: auto; }
+.shortcut-list { display: grid; grid-template-columns: 110px 1fr; gap: 8px 12px; margin: 0 0 20px; font-size: 14px; }
+.shortcut-list dt { font-weight: 750; color: var(--accent); }
+.shortcut-list dd { margin: 0; }
 .field { margin-bottom: 12px; }
 .field label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 5px; }
 .field input[type=text], .field input[type=password], .field input[type=number], .field input[type=date], .field input[type=time], .field textarea, .field select {
@@ -340,12 +429,14 @@ button { font: inherit; color: inherit; cursor: pointer; border: none; backgroun
 .mini-tally {
   position: fixed; left: 16px; bottom: calc(var(--safe-bottom) + 18px); z-index: 54;
   background: #0b1220; border: 1px solid var(--line); color: var(--text);
-  border-radius: 999px; padding: 9px 14px; display: flex; align-items: baseline; gap: 5px;
+  border-radius: 20px; padding: 9px 14px; display: flex; flex-direction: column; gap: 3px;
+  max-width: calc(100vw - 180px); overflow-wrap: anywhere;
   box-shadow: 0 8px 24px rgba(0,0,0,.4);
 }
 .mini-tally .mt-num { color: var(--accent); font-size: 16px; font-weight: 800; line-height: 1; }
 .mini-tally .mt-num.over { color: var(--red); }
 .mini-tally .mt-of { color: var(--muted); font-size: 12px; font-weight: 600; }
+.mini-tally .mt-status { color: var(--amber); font-size: 11px; }
 
 /* ---------- Floating jump-to-log button ---------- */
 .jump-btn {

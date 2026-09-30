@@ -11,6 +11,11 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 const fmt = (n) => { const r = Math.round(Number(n) * 100) / 100; return (Object.is(r, -0) ? 0 : r).toString(); };
 const fmtCal = (n) => Math.round(Number(n) || 0).toString();
 const isFav = (f) => f != null && state.favorites.includes(f.id);  // personal favorite?
+// Keep legacy saved categories compatible with the current names.
+function categoryName(value) {
+  const name = (value || "").trim();
+  return /^drinks?$/i.test(name) || /^beverages$/i.test(name) ? "Beverages" : /^cheese$/i.test(name) ? "Cheese" : name;
+}
 
 /* local-date (not UTC) helpers */
 function dateToStr(d) {
@@ -54,8 +59,13 @@ let db = null;
 const state = {
   person: "rich",         // who this deployment belongs to (from config); set in boot
   foods: [],
+  meals: [],              // this person's reusable food combinations
+  mealsReady: false,      // false until the saved_meals migration is available
   entries: [],            // entries for state.date (this person's only)
+  dayStatus: null,        // saved completeness flag for one person/date
+  dayStatusSaving: false,
   favorites: [],          // this person's favorite food ids (personal, not shared)
+  usual: null,            // local experiment preferences + frozen membership, never daily entries
   target: 20,
   categoryOrder: [],      // user-defined category display order
   trackCalories: false,   // calorie tracking on/off (synced)
@@ -63,10 +73,12 @@ const state = {
   calReady: false,        // whether the DB has the calorie columns yet
   date: todayStr(),
   search: "",
+  searchSelectionId: null,
+  editorSearch: "",
   tab: "log",
   logView: localStorage.getItem("ncc_logView") || "time",            // "time" | "summary"
   summaryGroup: localStorage.getItem("ncc_summaryGroup") || "category", // "category" | "flat"
-  openCat: localStorage.getItem("ncc_openCat") || null, // single expanded category (auto-close others)
+  openCat: categoryName(localStorage.getItem("ncc_openCat")) || null, // single expanded category (auto-close others)
   foodView: localStorage.getItem("ncc_foodView") || "cats", // "cats" | "az"
   voiceDraft: null,        // current Shortcut review; never saved until explicit confirmation
   labelDraft: null,        // current nutrition-label review; never saved until explicit confirmation
@@ -76,6 +88,7 @@ const state = {
 };
 
 let modalOpen = false; // hide bottom floating pills while a modal/pop-up is open
+let modalReturnFocus = null;
 let voiceLaunchInProgress = false;
 let labelLaunchInProgress = false;
 let returnRefreshInProgress = false;
@@ -94,6 +107,7 @@ async function boot() {
 
   // Identity + header come from config (this deployment is one specific person).
   state.person = window.NCC_CONFIG.PERSON || "rich";
+  usualSession();
   applyDisplayName(window.NCC_CONFIG.DISPLAY_NAME);
 
   try {
@@ -111,7 +125,9 @@ async function boot() {
     // favorites from the shared food list if their settings row is brand new.
     await loadFoods();
     await loadSettings();
+    await loadMeals();
     await loadEntries();
+    await loadDayStatus();
     await loadPendingItems({ quiet: true });
   } catch (e) {
     showSetupError("Connected, but couldn't read your tables. Did you run supabase-setup.sql? (" + e.message + ")");
@@ -122,6 +138,7 @@ async function boot() {
   }
 
   renderAll();
+  refreshUsualFoods(); // Background read: must not delay daily logging or Shortcut review.
   await handleVoiceLaunch();
   await handleLabelLaunch();
   setupReturnRefresh();
@@ -147,7 +164,22 @@ function applyDisplayName(name) {
 async function loadFoods() {
   const { data, error } = await db.from("foods").select("*").order("name");
   if (error) throw error;
-  state.foods = data || [];
+  state.foods = (data || []).map((food) => ({ ...food, category: categoryName(food.category) }));
+}
+async function loadMeals() {
+  const person = state.person;
+  try {
+    const { data, error } = await db.from("saved_meals").select("*").eq("person", person).order("name");
+    if (error) throw error;
+    if (state.person === person) {
+      state.meals = data || [];
+      state.mealsReady = true;
+    }
+  } catch (_) {
+    if (state.person === person) {
+      if (!state.mealsReady) state.meals = [];
+    }
+  }
 }
 async function loadSettings() {
   let { data, error } = await db.from("settings").select("*").eq("person", state.person).maybeSingle();
@@ -162,17 +194,119 @@ async function loadSettings() {
     data = res.data;
   }
   state.target = Number(data.daily_target);
-  if (Array.isArray(data.category_order)) state.categoryOrder = data.category_order;
+  if (Array.isArray(data.category_order)) state.categoryOrder = [...new Set(data.category_order.map(categoryName))];
   state.favorites = Array.isArray(data.favorites) ? data.favorites.slice() : [];
   state.calReady = ("track_calories" in data); // calorie columns present?
   state.trackCalories = !!(state.calReady && data.track_calories);
   if (data.calorie_target != null) state.calorieTarget = Number(data.calorie_target);
 }
 async function loadEntries() {
+  const person = state.person, date = state.date;
   const { data, error } = await db.from("entries")
-    .select("*").eq("person", state.person).eq("log_date", state.date).order("created_at");
+    .select("*").eq("person", person).eq("log_date", date).order("created_at");
   if (error) throw error;
-  state.entries = data || [];
+  if (state.person === person && state.date === date) state.entries = data || [];
+}
+
+let dayStatusRequest = 0;
+function currentDayStatus() {
+  const status = state.dayStatus;
+  return status?.person === state.person && status?.date === state.date ? status : null;
+}
+function dayIsIncomplete() { return currentDayStatus()?.incomplete === true; }
+
+async function loadDayStatus() {
+  if (state.dayStatusSaving) return;
+  const person = state.person, date = state.date, request = ++dayStatusRequest;
+  state.dayStatus = { person, date, loading: true };
+  renderDayStatus();
+  try {
+    const { data, error } = await db.from("day_log_status").select("incomplete")
+      .eq("person", person).eq("log_date", date).maybeSingle();
+    if (error) throw error;
+    if (request !== dayStatusRequest || person !== state.person || date !== state.date) return;
+    state.dayStatus = { person, date, incomplete: data?.incomplete === true };
+  } catch (_) {
+    if (request !== dayStatusRequest || person !== state.person || date !== state.date) return;
+    state.dayStatus = { person, date, error: true };
+  }
+  renderProgress();
+}
+
+async function toggleDayIncomplete() {
+  if (state.dayStatusSaving || state.date > todayStr()) return;
+  const status = currentDayStatus();
+  if (!status || status.error) return loadDayStatus();
+  if (status.loading) return;
+  const person = state.person, date = state.date, incomplete = !status.incomplete;
+  state.dayStatusSaving = true;
+  ++dayStatusRequest; // A read started before this write cannot overwrite it.
+  renderDayStatus();
+  try {
+    const { data, error } = await db.from("day_log_status").upsert({
+      person, log_date: date, incomplete, updated_at: new Date().toISOString(),
+    }, { onConflict: "person,log_date" }).select("incomplete").single();
+    if (error || data?.incomplete !== incomplete) throw error || new Error("Flag not saved");
+    if (person === state.person && date === state.date) state.dayStatus = { person, date, incomplete };
+    toast(incomplete ? "Day marked as incomplete" : "Incomplete flag removed");
+  } catch (_) {
+    toast("Couldn’t save the day flag. Please try again.");
+  } finally {
+    state.dayStatusSaving = false;
+    renderProgress();
+    if (person !== state.person || date !== state.date) await loadDayStatus();
+  }
+}
+
+function usualSession() {
+  if (!state.usual || state.usual.person !== state.person) {
+    state.usual?.controller?.abort();
+    state.usual = { person: state.person, ...window.NCCUsualFoods.readPreferences(localStorage, state.person),
+      status: "idle", ids: [], request: 0, controller: null };
+  }
+  return state.usual;
+}
+
+async function refreshUsualFoods({ freshSession = false } = {}) {
+  const session = usualSession();
+  if (freshSession) {
+    session.controller?.abort();
+    session.request++;
+    session.status = "idle";
+    session.ids = [];
+  }
+  if (!session.enabled || session.status !== "idle") return;
+  const request = ++session.request;
+  const controller = new AbortController();
+  session.controller = controller;
+  session.status = "loading";
+  renderFoodGrid();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  const current = () => state.person === session.person && state.usual === session && session.request === request;
+  try {
+    const window = globalThis.NCCUsualFoods.windowFor();
+    const history = await globalThis.NCCUsualFoods.loadHistory(db, session.person, window, { signal: controller.signal });
+    if (!current()) return;
+    session.ids = globalThis.NCCUsualFoods.rank(state.foods, history, session.person, window);
+    session.status = "ready";
+  } catch (_) {
+    if (!current()) return;
+    session.ids = [];
+    session.status = "error";
+  } finally {
+    clearTimeout(timer);
+    if (current()) { session.controller = null; renderFoodGrid(); }
+  }
+}
+
+function setUsualPreference(changes) {
+  const session = usualSession();
+  Object.assign(session, changes);
+  if (!window.NCCUsualFoods.writePreferences(localStorage, state.person, session)) {
+    toast("Layout changed for now; this browser couldn’t remember it");
+  }
+  renderFoodGrid();
+  refreshUsualFoods();
 }
 
 function pendingManageKey() {
@@ -357,7 +491,7 @@ async function refreshAfterReturn() {
   if (!db || modalOpen || returnRefreshInProgress || document.visibilityState === "hidden") return;
   returnRefreshInProgress = true;
   try {
-    await Promise.all([loadFoods(), loadSettings(), loadEntries(), loadPendingItems({ quiet: true })]);
+    await Promise.all([loadFoods(), loadMeals(), loadSettings(), loadEntries(), loadDayStatus(), loadPendingItems({ quiet: true })]);
     renderAll();
   } catch (e) {
     // Keep the currently displayed data; a brief connection loss should not blank the app.
@@ -367,10 +501,21 @@ async function refreshAfterReturn() {
 }
 
 function setupReturnRefresh() {
+  let awayAt = document.visibilityState === "hidden" ? Date.now() : null;
+  const onReturn = () => {
+    if (document.visibilityState === "hidden") return;
+    if (awayAt !== null && Date.now() - awayAt >= 15 * 60 * 1000) {
+      refreshUsualFoods({ freshSession: true });
+    }
+    awayAt = null;
+    refreshAfterReturn();
+  };
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") refreshAfterReturn();
+    if (document.visibilityState === "hidden") { if (awayAt === null) awayAt = Date.now(); }
+    else onReturn();
   });
-  window.addEventListener("pageshow", (e) => { if (e.persisted) refreshAfterReturn(); });
+  window.addEventListener("pagehide", () => { if (awayAt === null) awayAt = Date.now(); });
+  window.addEventListener("pageshow", (e) => { if (e.persisted) onReturn(); });
 }
 
 /* ============================================================
@@ -458,7 +603,7 @@ function foodRow(values) {
     name: values.name.trim(),
     serving: values.serving.trim(),
     net_carbs: Number(values.net_carbs) || 0,
-    category: values.category.trim(),
+    category: categoryName(values.category),
   };
   if (state.calReady && values.calories !== undefined) {
     const c = String(values.calories).trim();
@@ -486,7 +631,7 @@ async function saveFood(values, existing, onSaved) {
   }
   state.foods.sort((a, b) => a.name.localeCompare(b.name));
   await setFavorite(foodId, !!values.favorite);   // personal: persists to this person's settings
-  closeModal(); renderFoodGrid(); renderEditor();
+  closeModal(); renderFoodGrid(); renderEditor(); renderMealCards(); renderMeals();
   if (onSaved) onSaved(savedFood);
 }
 
@@ -503,7 +648,7 @@ async function saveLabelFood(values, draft) {
   }
   if (error) return false;
 
-  const saved = data[0];
+  const saved = { ...data[0], category: categoryName(data[0].category) };
   const current = state.foods.find((food) => food.id === saved.id);
   if (current) Object.assign(current, saved);
   else state.foods.push(saved);
@@ -512,7 +657,7 @@ async function saveLabelFood(values, draft) {
   markLabelDraftSaved(draft.draftId);
   state.labelDraft = null;
   closeModal();
-  renderFoodGrid(); renderEditor();
+  renderFoodGrid(); renderEditor(); renderMealCards(); renderMeals();
   toast(`Saved ${saved.name} to My Foods`);
   return true;
 }
@@ -530,10 +675,82 @@ async function setFavorite(foodId, on) {
 
 async function deleteFood(food) {
   state.foods = state.foods.filter((f) => f.id !== food.id);
-  closeModal(); renderFoodGrid(); renderEditor();
+  closeModal(); renderFoodGrid(); renderEditor(); renderMealCards(); renderMeals();
   if (state.favorites.includes(food.id)) setFavorite(food.id, false); // tidy up this person's favorites
   const { error } = await db.from("foods").delete().eq("id", food.id);
-  if (error) { state.foods.push(food); state.foods.sort((a, b) => a.name.localeCompare(b.name)); renderFoodGrid(); renderEditor(); toast("Couldn’t delete food"); }
+  if (error) { state.foods.push(food); state.foods.sort((a, b) => a.name.localeCompare(b.name)); renderFoodGrid(); renderEditor(); renderMealCards(); renderMeals(); toast("Couldn’t delete food"); }
+  else { renderMealCards(); renderMeals(); }
+}
+
+function validMealRows(rows) {
+  if (!Array.isArray(rows) || rows.length < 1 || rows.length > 30) return false;
+  const ids = new Set();
+  return rows.every((row) => {
+    if (!state.foods.some((food) => food.id === row.food_id) || ids.has(row.food_id) ||
+        !Number.isFinite(row.qty) || row.qty < 0.01 || row.qty > 100) return false;
+    ids.add(row.food_id);
+    return true;
+  });
+}
+
+async function saveMeal(name, rows, existing) {
+  if (!state.mealsReady || !name.trim() || name.trim().length > 120 || !validMealRows(rows)) return false;
+  const values = { name: name.trim(), items: rows.map((row) => ({ food_id: row.food_id, qty: row.qty })),
+    updated_at: new Date().toISOString() };
+  let result;
+  if (existing) result = await db.from("saved_meals").update(values).eq("id", existing.id).eq("person", state.person).select().single();
+  else result = await db.from("saved_meals").insert({ ...values, person: state.person }).select().single();
+  if (result.error || !result.data) {
+    toast(result.error?.code === "23505" ? "A meal with that name already exists" : "Couldn’t save the meal");
+    return false;
+  }
+  if (existing) Object.assign(existing, result.data);
+  else state.meals.push(result.data);
+  state.meals.sort((a, b) => a.name.localeCompare(b.name));
+  renderMealCards(); renderMeals();
+  return true;
+}
+
+async function deleteMeal(meal) {
+  const { error } = await db.from("saved_meals").delete().eq("id", meal.id).eq("person", state.person);
+  if (error) return toast("Couldn’t delete the meal");
+  state.meals = state.meals.filter((item) => item.id !== meal.id);
+  closeModal(); renderMealCards(); renderMeals();
+  toast(`Deleted ${meal.name}. Past food entries are kept.`);
+}
+
+function mealEntryRows(rows, date, person) {
+  if (!validMealRows(rows)) throw new Error("invalid_meal_rows");
+  return rows.map((item) => {
+    const food = state.foods.find((candidate) => candidate.id === item.food_id);
+    const row = { id: window.NCCLogLater.uuid(), food_id: food.id, name: food.name,
+      net_carbs: Number(food.net_carbs), qty: item.qty, log_date: date, person };
+    if (state.calReady) row.calories = food.calories == null ? null : Number(food.calories);
+    return row;
+  });
+}
+
+async function saveMealEntries(rows) {
+  const ids = rows.map((row) => row.id);
+  let result;
+  try { result = await db.from("entries").upsert(rows, { onConflict: "id", ignoreDuplicates: true }).select("*"); }
+  catch (_) { result = { error: true, data: null }; }
+  let saved = result.data || [];
+  if (result.error || saved.length !== rows.length) {
+    let read;
+    try { read = await db.from("entries").select("*").in("id", ids); }
+    catch (_) { return false; }
+    if (read.error || (read.data || []).length !== rows.length ||
+        !(read.data || []).every((entry) => ids.includes(entry.id))) return false;
+    saved = read.data;
+  }
+  if (state.person === rows[0].person && state.date === rows[0].log_date) {
+    const shown = new Set(state.entries.map((entry) => entry.id));
+    state.entries.push(...saved.filter((entry) => !shown.has(entry.id)));
+    state.entries.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    renderEntries(); renderProgress();
+  }
+  return true;
 }
 
 async function setTarget(t) {
@@ -570,16 +787,42 @@ function exportFoods() {
   downloadFile("my-foods.csv", toCSV(rows), "text/csv");
   toast(`Exported ${state.foods.length} foods`);
 }
+async function loadExportRows(table, person) {
+  const rows = [];
+  // Continue until an empty page, even when the server's cap is below 500.
+  for (;;) {
+    let query = db.from(table).select("*").eq("person", person).order("log_date");
+    if (table === "entries") query = query.order("created_at").order("id");
+    const { data, error } = await query.range(rows.length, rows.length + 499);
+    if (error) throw error;
+    if (!data?.length) return rows;
+    rows.push(...data);
+  }
+}
+
 async function exportLog() {
-  const { data, error } = await db.from("entries").select("*").eq("person", state.person)
-    .order("log_date", { ascending: true }).order("created_at", { ascending: true });
-  if (error) return toast("Couldn’t export log");
-  const cal = state.trackCalories;
-  const rows = [["date", "food", "net_carbs_per_serving", "qty", "net_carbs_total", ...(cal ? ["calories_total"] : [])],
-    ...(data || []).map((e) => [e.log_date, e.name, e.net_carbs, e.qty, Math.round(e.net_carbs * e.qty * 100) / 100,
-      ...(cal ? [e.calories == null ? "" : Math.round(e.calories * e.qty)] : [])])];
-  downloadFile("net-carb-log.csv", toCSV(rows), "text/csv");
-  toast(`Exported ${(data || []).length} log entries`);
+  const person = state.person, cal = state.trackCalories;
+  try {
+    const [entries, statuses] = await Promise.all([
+      loadExportRows("entries", person), loadExportRows("day_log_status", person),
+    ]);
+    const incompleteDates = new Set(statuses.filter((s) => s.incomplete).map((s) => s.log_date));
+    const entryDates = new Set(entries.map((e) => e.log_date));
+    const dataRows = entries.map((e) => [e.log_date, e.name, e.net_carbs, e.qty,
+      Math.round(e.net_carbs * e.qty * 100) / 100,
+      ...(cal ? [e.calories == null ? "" : Math.round(e.calories * e.qty)] : []),
+      incompleteDates.has(e.log_date), "food"]);
+    for (const date of incompleteDates) {
+      if (!entryDates.has(date)) dataRows.push([date, "", "", "", "", ...(cal ? [""] : []), true, "day_status"]);
+    }
+    dataRows.sort((a, b) => a[0].localeCompare(b[0]));
+    const rows = [["date", "food", "net_carbs_per_serving", "qty", "net_carbs_total",
+      ...(cal ? ["calories_total"] : []), "day_log_incomplete", "row_type"], ...dataRows];
+    downloadFile("net-carb-log.csv", toCSV(rows), "text/csv");
+    toast(`Exported ${entries.length} log entries and ${incompleteDates.size} incomplete day flags`);
+  } catch (_) {
+    toast("Couldn’t export the full log and day flags. Please try again.");
+  }
 }
 
 /* ============================================================
@@ -613,8 +856,58 @@ function categoriesInUse() {
   const arr = [...set]; if (other) arr.push("Other");
   return sortCats(arr);
 }
+function categoryChoices() {
+  return sortCats([...new Set(["Beverages", "Cheese", ...state.foods.map((f) => categoryName(f.category)).filter(Boolean)])]);
+}
+function searchFoods(query) {
+  const q = query.trim().toLowerCase();
+  return state.foods.filter((f) => [f.name, f.serving, f.category].some((value) => (value || "").toLowerCase().includes(q)));
+}
 
-function renderAll() { renderDate(); renderProgress(); renderFoodGrid(); renderEntries(); renderEditor(); }
+function logSearchResults() {
+  const q = state.search.trim().toLowerCase();
+  if (!q) return [];
+  const rank = (food) => {
+    const name = food.name.toLowerCase();
+    if (name === q) return 0;
+    if (name.startsWith(q)) return 1;
+    if (name.includes(q)) return 2;
+    if ((food.serving || "").toLowerCase().includes(q)) return 3;
+    return 4; // category match
+  };
+  return searchFoods(q).sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+}
+
+function clearLogSearch({ focus = false } = {}) {
+  const input = $("#foodSearch");
+  input.value = "";
+  state.search = "";
+  state.searchSelectionId = null;
+  $("#clearFoodSearch").classList.add("hidden");
+  renderFoodGrid();
+  if (focus) input.focus({ preventScroll: true });
+}
+
+function selectedSearchFood() {
+  return logSearchResults().find((food) => food.id === state.searchSelectionId) || null;
+}
+
+function moveSearchSelection(delta) {
+  const hits = logSearchResults();
+  if (!hits.length) return;
+  const index = hits.findIndex((food) => food.id === state.searchSelectionId);
+  state.searchSelectionId = hits[(index + delta + hits.length) % hits.length].id;
+  renderFoodGrid();
+  $("#foodGrid .keyboard-selected")?.scrollIntoView({ block: "nearest" });
+}
+
+function logSelectedFood(food) {
+  confirmPulse($("#foodGrid .keyboard-selected"), Number(food.net_carbs));
+  logFood(food, 1);
+  clearLogSearch({ focus: true });
+}
+
+function renderAll() { renderDate(); renderProgress(); renderFoodGrid(); renderEntries(); renderEditor(); renderMealCards(); renderMeals(); }
 
 function renderDate() {
   const lbl = $("#dateLabel");
@@ -625,6 +918,8 @@ function renderDate() {
 function renderProgress() {
   const total = dayTotal();
   const pendingToday = dayPending().length;
+  const incomplete = dayIsIncomplete() || pendingToday > 0;
+  renderDayStatus();
   const pendingAll = state.pendingItems.length;
   $("#dayTotal").textContent = fmt(total);
   $("#targetLabel").textContent = fmt(state.target);
@@ -634,8 +929,8 @@ function renderProgress() {
   const over = total > state.target;
   fill.classList.toggle("over", over);
   const rem = $("#remainingLabel");
-  if (over) { rem.textContent = `${fmt(total - state.target)} g over${pendingToday ? " (known)" : ""}`; rem.classList.add("over"); }
-  else { rem.textContent = `${fmt(state.target - total)} g left${pendingToday ? " (known)" : ""}`; rem.classList.remove("over"); }
+  if (over) { rem.textContent = `${fmt(total - state.target)} g over${incomplete ? " (known)" : ""}`; rem.classList.add("over"); }
+  else { rem.textContent = `${fmt(state.target - total)} g left${incomplete ? " (known)" : ""}`; rem.classList.remove("over"); }
 
   const calLine = $("#calLine");
   if (calLine) {
@@ -645,7 +940,7 @@ function renderProgress() {
       const { total: cal, unknown } = dayCalories();
       let html = `${unknown ? "≈ " : ""}<b>${fmtCal(cal)}</b> / ${fmtCal(state.calorieTarget)} cal`;
       if (unknown) html += ` <span class="cal-unknown">· ${unknown} unknown</span>`;
-      if (pendingToday) html += ` <span class="cal-unknown">· incomplete</span>`;
+      if (incomplete) html += ` <span class="cal-unknown">· incomplete</span>`;
       calLine.innerHTML = html;
     }
   }
@@ -658,9 +953,22 @@ function renderProgress() {
   renderMiniTally();
 }
 
-function foodCardHTML(f) {
+function renderDayStatus() {
+  const button = $("#dayIncompleteBtn"), note = $("#dayIncompleteNote");
+  if (!button || !note) return;
+  const status = currentDayStatus(), incomplete = dayIsIncomplete();
+  button.disabled = state.dayStatusSaving || !!status?.loading || state.date > todayStr();
+  button.setAttribute("aria-pressed", String(incomplete));
+  button.textContent = state.dayStatusSaving ? "Saving day flag…" : status?.loading ? "Loading day flag…"
+    : status?.error ? "Retry day flag" : incomplete ? "⚑ Day log incomplete" : "Flag day as incomplete";
+  note.textContent = status?.error ? "Couldn’t load this day’s flag. Tap to retry."
+    : incomplete ? "Some food wasn’t logged. Tap again to remove the flag."
+    : "Use when the day ended with food missing from the log.";
+}
+
+function foodCardHTML(f, selected = false) {
   const fav = isFav(f);
-  return `<button class="food-btn ${fav ? "fav" : ""}" data-food="${f.id}">
+  return `<button class="food-btn ${fav ? "fav" : ""}${selected ? " keyboard-selected" : ""}" data-food="${f.id}">
     ${fav ? '<span class="fav-star">★</span>' : ""}
     <span class="fname">${esc(f.name)}</span>
     <span class="frow">
@@ -674,28 +982,64 @@ function updateFoodViewSeg() {
   $$("#foodViewSeg button").forEach((b) => b.classList.toggle("active", b.dataset.fview === state.foodView));
 }
 
+function usualFoodsHTML() {
+  const session = usualSession();
+  const foods = session.mode === "favorites" ? state.foods.filter(isFav) :
+    session.ids.map((id) => state.foods.find((food) => food.id === id)).filter(Boolean).sort(window.NCCUsualFoods.byName);
+  let content;
+  if (session.mode === "favorites") {
+    content = foods.length ? foods.map(foodCardHTML).join("") : '<p class="usual-note">No favorites yet. Add stars in My Foods.</p>';
+  } else if (session.status === "error") {
+    content = '<p class="usual-note" role="status">Most used is unavailable right now</p><button class="wide-btn usual-fallback" data-usual-mode="favorites">Show Favorites</button>';
+  } else if (session.status !== "ready") {
+    content = '<p class="usual-note" role="status">Loading Most used…</p><button class="wide-btn usual-fallback" data-usual-mode="favorites">Show Favorites</button>';
+  } else {
+    content = foods.length ? foods.map(foodCardHTML).join("") : '<p class="usual-note">Your usual foods will appear as you log meals</p><button class="wide-btn usual-fallback" data-usual-mode="favorites">Show Favorites</button>';
+  }
+  return `<section class="usual-foods" aria-labelledby="usual-heading">
+    <div class="cat-head" id="usual-heading">Usual foods</div>
+    <div class="seg usual-modes" aria-label="Usual foods selection">
+      <button type="button" data-usual-mode="most" aria-pressed="${session.mode === "most"}" class="${session.mode === "most" ? "active" : ""}">Most used</button>
+      <button type="button" data-usual-mode="favorites" aria-pressed="${session.mode === "favorites"}" class="${session.mode === "favorites" ? "active" : ""}">Favorites</button>
+    </div>
+    <div class="usual-grid">${content}</div>
+  </section>`;
+}
+
 function renderFoodGrid() {
   const grid = $("#foodGrid");
+  $("#savedMealsSection")?.classList.toggle("hidden", !!state.search.trim());
   if (!state.foods.length) {
+    if ($("#foodSearchStatus")) $("#foodSearchStatus").textContent = "";
     grid.innerHTML = `<p class="empty-note">No foods yet. Go to <b>My Foods</b> and add your first one →</p>`;
+    renderJump(); renderMiniTally();
     return;
   }
   updateFoodViewSeg();
-  const q = state.search.toLowerCase();
+  const q = state.search.trim();
   // While searching, show a flat list of matches across ALL foods (ignore collapse).
   if (q) {
-    const hits = state.foods.filter((f) => f.name.toLowerCase().includes(q) || (f.category || "").toLowerCase().includes(q));
-    grid.innerHTML = hits.length ? hits.map(foodCardHTML).join("") : `<p class="empty-note">No matches for “${esc(state.search)}”.</p>`;
+    const hits = logSearchResults();
+    if (!hits.some((food) => food.id === state.searchSelectionId)) state.searchSelectionId = hits[0]?.id || null;
+    grid.innerHTML = hits.length ? hits.map((food) => foodCardHTML(food, food.id === state.searchSelectionId)).join("") : `<p class="empty-note">No matches for “${esc(state.search)}”.</p>`;
+    const selected = selectedSearchFood();
+    const status = $("#foodSearchStatus");
+    if (status) status.textContent = selected ? `${hits.length} match${hits.length === 1 ? "" : "es"}. Selected: ${selected.name}${selected.serving ? `, ${selected.serving}` : ""}. Enter to log; Shift+Enter for portions.` : "No matching foods.";
+    renderJump(); renderMiniTally();
     return;
   }
+  state.searchSelectionId = null;
+  if ($("#foodSearchStatus")) $("#foodSearchStatus").textContent = "";
   // A–Z view: every food, flat, alphabetical
   if (state.foodView === "az") {
     grid.innerHTML = [...state.foods].sort((a, b) => a.name.localeCompare(b.name)).map(foodCardHTML).join("");
+    renderJump(); renderMiniTally();
     return;
   }
   let html = "";
   const favs = state.foods.filter(isFav);
-  if (favs.length) html += `<div class="cat-head">★ Favorites</div>` + favs.map(foodCardHTML).join("");
+  if (usualSession().enabled) html += usualFoodsHTML();
+  else if (favs.length) html += `<div class="cat-head">★ Favorites</div>` + favs.map(foodCardHTML).join("");
 
   // group ALL foods by category (favorites appear here too, in addition to the top section)
   const cats = {};
@@ -717,6 +1061,7 @@ function renderFoodGrid() {
     }
   }
   grid.innerHTML = html;
+  renderJump(); renderMiniTally();
 }
 
 function toggleCat(cat) {
@@ -847,10 +1192,29 @@ function summaryHTML() {
   return html + pendingHtml;
 }
 
+const FOOD_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ#";
+function foodIndexLetter(name) {
+  const first = name.trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").charAt(0).toUpperCase();
+  return /^[A-Z]$/.test(first) ? first : "#";
+}
+
 function renderEditor() {
   const list = $("#foodEditorList");
-  if (!state.foods.length) { list.innerHTML = `<p class="empty-note">Your food list is empty. Tap “Add a food” above.</p>`; return; }
-  list.innerHTML = state.foods.map((f) => `
+  const foods = searchFoods(state.editorSearch).sort((a, b) =>
+    FOOD_ALPHABET.indexOf(foodIndexLetter(a.name)) - FOOD_ALPHABET.indexOf(foodIndexLetter(b.name)) || a.name.localeCompare(b.name));
+  const letters = new Set(foods.map((f) => foodIndexLetter(f.name)));
+  const alphabet = $("#foodAlphabet");
+  alphabet.classList.toggle("hidden", letters.size < 2);
+  alphabet.innerHTML = [...FOOD_ALPHABET].map((letter) => `<button type="button" data-letter="${letter}" aria-label="Jump to ${letter === "#" ? "numbers and symbols" : letter}" ${letters.has(letter) ? `aria-controls="food-letter-${letter === "#" ? "other" : letter}"` : "disabled"}>${letter}</button>`).join("");
+  let previousLetter = null;
+  $("#foodEditorCount").textContent = state.editorSearch.trim() ? `${foods.length} of ${state.foods.length} foods` : `${foods.length} foods`;
+  if (!state.foods.length) list.innerHTML = `<p class="empty-note">Your food list is empty. Tap “Add a food” above.</p>`;
+  else if (!foods.length) list.innerHTML = `<p class="empty-note">No matches for “${esc(state.editorSearch.trim())}”. Try a name, serving, or category.</p>`;
+  else list.innerHTML = foods.map((f) => {
+    const letter = foodIndexLetter(f.name);
+    const heading = letter !== previousLetter ? `<h2 class="editor-letter" id="food-letter-${letter === "#" ? "other" : letter}" tabindex="-1">${letter}</h2>` : "";
+    previousLetter = letter;
+    return `${heading}
     <div class="editor-row" data-edit="${f.id}">
       <div class="er-main">
         <div class="er-name">${isFav(f) ? "★ " : ""}${esc(f.name)}</div>
@@ -858,7 +1222,86 @@ function renderEditor() {
       </div>
       <span class="er-carb">${fmt(f.net_carbs)} g</span>
       <button class="er-edit" aria-label="edit">✎</button>
-    </div>`).join("");
+    </div>`;
+  }).join("");
+  renderJump();
+}
+
+function mealRows(meal) {
+  return Array.isArray(meal.items) ? meal.items.map((item) => ({
+    food_id: String(item.food_id || ""), qty: Number(item.qty),
+  })) : [];
+}
+
+function mealTotals(rows) {
+  let carbs = 0, calories = 0, unknown = 0, missing = 0;
+  for (const row of rows) {
+    const food = state.foods.find((item) => item.id === row.food_id);
+    if (!food) { missing++; continue; }
+    carbs += Number(food.net_carbs) * row.qty;
+    if (food.calories == null) unknown++;
+    else calories += Number(food.calories) * row.qty;
+  }
+  return { carbs, calories, unknown, missing };
+}
+
+function mealDescription(meal) {
+  return mealRows(meal).map((row) => {
+    const food = state.foods.find((item) => item.id === row.food_id);
+    return `${food ? food.name : "Missing food"} ${fmt(row.qty)}×`;
+  }).join(" · ");
+}
+
+function renderMealCards() {
+  const list = $("#mealQuickList");
+  if (!list) return;
+  if (!state.mealsReady) {
+    list.innerHTML = '<p class="meal-note">Saved meals need the database update before they can be used.</p>';
+    return;
+  }
+  if (!state.meals.length) {
+    list.innerHTML = '<p class="meal-note">No saved meals yet. Save a combination in My Meals.</p>';
+    return;
+  }
+  list.innerHTML = state.meals.map((meal) => {
+    const rows = mealRows(meal), totals = mealTotals(rows), ready = validMealRows(rows);
+    return `<button type="button" class="meal-quick-card" data-meal-log="${esc(meal.id)}" ${ready ? "" : "disabled"}>
+      <span class="meal-card-name">${esc(meal.name)}</span>
+      <span class="meal-card-meta">${ready ? `${fmt(totals.carbs)} g net · ${rows.length} foods` : "Needs an updated food or serving"}</span>
+    </button>`;
+  }).join("");
+}
+
+function renderMeals() {
+  const list = $("#mealEditorList");
+  if (!list) return;
+  const add = $("#addMealBtn");
+  if (add) add.disabled = !state.mealsReady || !state.foods.length;
+  if (!state.mealsReady) {
+    list.innerHTML = '<p class="empty-note">Saved meals need the database update. Run the saved_meals migration, then reload.</p>';
+    return;
+  }
+  if (!state.foods.length) {
+    list.innerHTML = '<p class="empty-note">Add foods in My Foods before creating a meal.</p>';
+    return;
+  }
+  if (!state.meals.length) {
+    list.innerHTML = '<p class="empty-note">No saved meals yet. Add your first combination above.</p>';
+    return;
+  }
+  list.innerHTML = state.meals.map((meal) => {
+    const rows = mealRows(meal), totals = mealTotals(rows), ready = validMealRows(rows);
+    return `<div class="meal-editor-card">
+      <div class="meal-editor-content"><b>${esc(meal.name)}</b>
+        <span>${esc(mealDescription(meal))}</span>
+        <small>${ready ? `${fmt(totals.carbs)} g net${state.trackCalories ? ` · ${totals.unknown ? "some calories unknown" : `${fmtCal(totals.calories)} cal`}` : ""}` : "Needs an updated food or serving · edit to repair"}</small>
+      </div>
+      <div class="meal-editor-actions">
+        <button type="button" data-meal-edit="${esc(meal.id)}">Edit</button>
+        <button type="button" class="meal-log-btn" data-meal-log="${esc(meal.id)}" ${ready ? "" : "disabled"}>Log</button>
+      </div>
+    </div>`;
+  }).join("");
 }
 
 /* ============================================================
@@ -866,6 +1309,7 @@ function renderEditor() {
    ============================================================ */
 function openModal(node) {
   const root = $("#modalRoot");
+  if (!modalOpen) modalReturnFocus = document.activeElement;
   root.innerHTML = "";
   root.appendChild(node);
   root.classList.remove("hidden");
@@ -875,10 +1319,54 @@ function openModal(node) {
     else closeModal();
   };
   modalOpen = true; renderJump(); renderMiniTally();
+  // Record the initial form after the caller has finished populating dynamic rows.
+  queueMicrotask(() => { if (root.firstElementChild === node) node._initialFields = modalFieldValues(node); });
 }
 function closeModal() {
   $("#modalRoot").classList.add("hidden"); $("#modalRoot").innerHTML = "";
   modalOpen = false; renderJump(); renderMiniTally();
+  if (modalReturnFocus?.isConnected) modalReturnFocus.focus({ preventScroll: true });
+  modalReturnFocus = null;
+}
+
+function modalFieldValues(node) {
+  return JSON.stringify([...node.querySelectorAll("input, textarea, select")].map((field) =>
+    [field.type, field.type === "checkbox" ? field.checked : field.value]));
+}
+
+function escapeModal() {
+  const node = $("#modalRoot").firstElementChild;
+  if (!node) return;
+  const saving = [...node.querySelectorAll("button")].some((button) => /^(Saving|Logging)…/.test(button.textContent));
+  if (saving) return;
+  if (node._onEscape) return node._onEscape();
+  const dirty = node._initialFields != null && node._initialFields !== modalFieldValues(node);
+  if (dirty && !confirm("Discard your unsaved changes?")) return;
+  const cancel = node.querySelector("[data-close]");
+  if (cancel) cancel.click();
+  else closeModal();
+}
+
+function openKeyboardHelp() {
+  const m = el(`<div class="modal shortcut-modal" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+    <h2>Keyboard shortcuts</h2>
+    <dl class="shortcut-list">
+      <dt>/</dt><dd>Search foods to log</dd>
+      <dt>↑ ↓</dt><dd>Choose a search result</dd>
+      <dt>Enter</dt><dd>Log the selected food</dd>
+      <dt>Shift+Enter</dt><dd>Choose a portion</dd>
+      <dt>Esc</dt><dd>Clear search, then leave it</dd>
+      <dt>[ &nbsp; ]</dt><dd>Previous / next day</dd>
+      <dt>T</dt><dd>Today</dd>
+      <dt>L &nbsp; F &nbsp; M</dt><dd>Log / My Foods / My Meals</dd>
+      <dt>O &nbsp; N &nbsp; P</dt><dd>One-off / New food / Pending items</dd>
+      <dt>?</dt><dd>Show this list</dd>
+    </dl>
+    <div class="modal-actions"><button class="btn-green" data-close>Close</button></div>
+  </div>`);
+  m.querySelector("[data-close]").onclick = closeModal;
+  openModal(m);
+  m.querySelector("[data-close]").focus();
 }
 
 /* ---------- Log later ---------- */
@@ -1188,7 +1676,105 @@ function openFinishPending(item, suppliedDraft) {
   openModal(m); drawRows();
 }
 
-function openPortionSheet(food) {
+function openMealDialog(meal, mode = "edit") {
+  if (!state.mealsReady || !state.foods.length) return;
+  const logging = mode === "log";
+  const date = state.date, person = state.person;
+  let rows = meal ? mealRows(meal) : [{ food_id: "", qty: 1 }];
+  let entryRows = null; // Stable IDs and values make an uncertain save safe to retry.
+  const m = el(`<div class="modal meal-modal" role="dialog" aria-modal="true" aria-label="${logging ? "Log meal" : meal ? "Edit meal" : "Add meal"}">
+    <h2>${logging ? `Log ${esc(meal.name)}` : meal ? "Edit meal" : "Add a meal"}</h2>
+    <p class="muted meal-dialog-intro">${logging ? `For ${esc(fmtDateLabel(date))}. Adjust foods or servings for this occasion; the saved meal stays the same.` : "Choose the foods and usual servings. Nutrition uses their current saved values when logged."}</p>
+    ${logging ? "" : `<div class="field"><label for="meal-name">Meal name</label><input type="text" id="meal-name" maxlength="120" value="${esc(meal?.name || "")}" placeholder="e.g. Usual breakfast" /></div>`}
+    <div id="meal-dialog-rows" class="meal-dialog-rows"></div>
+    <button type="button" class="btn-ghost meal-add-row" id="meal-add-row">+ Another food</button>
+    <p id="meal-dialog-total" class="meal-dialog-total"></p>
+    <p id="meal-dialog-status" class="field-help" role="status"></p>
+    <div class="modal-actions">
+      ${!logging && meal ? '<button type="button" class="btn-danger" id="meal-delete">Delete</button>' : ""}
+      <button type="button" class="btn-ghost" data-close>Cancel</button>
+      <button type="button" class="btn-green" id="meal-submit" disabled>${logging ? "Log meal" : "Save meal"}</button>
+    </div>
+  </div>`);
+  const body = m.querySelector("#meal-dialog-rows");
+  const submit = m.querySelector("#meal-submit");
+  const status = m.querySelector("#meal-dialog-status");
+  const nameInput = m.querySelector("#meal-name");
+  const readRows = () => {
+    rows = [...body.querySelectorAll("[data-meal-row]")].map((row) => ({
+      food_id: row.querySelector("[data-meal-food]").value,
+      qty: Number(row.querySelector("[data-meal-qty]").value),
+    }));
+    return rows;
+  };
+  const sync = () => {
+    readRows();
+    const valid = validMealRows(rows);
+    const nameValid = logging || !!nameInput.value.trim();
+    submit.disabled = !valid || !nameValid;
+    if (!nameValid) status.textContent = "Give this meal a name.";
+    else if (!valid) status.textContent = "Choose distinct saved foods and a serving amount from 0.01 to 100 for each.";
+    else status.textContent = logging ? "Nothing is logged until you choose Log meal." : "Ready to save this meal.";
+    const totals = valid ? mealTotals(rows) : null;
+    m.querySelector("#meal-dialog-total").textContent = totals
+      ? `${fmt(totals.carbs)} g net${state.trackCalories ? ` · ${totals.unknown ? "some calories unknown" : `${fmtCal(totals.calories)} cal`}` : ""}` : "";
+  };
+  const drawRows = () => {
+    body.innerHTML = rows.map((row, index) => {
+      const missing = row.food_id && !state.foods.some((food) => food.id === row.food_id);
+      const options = missing ? `<option value="${esc(row.food_id)}" selected>Missing saved food — choose another</option>` : "";
+      return `<div class="meal-dialog-row" data-meal-row="${index}">
+        <div class="field"><label>Saved food</label><select data-meal-food>${options}${voiceFoodOptions(row.food_id)}</select></div>
+        <div class="field meal-row-qty"><label>Servings</label><input type="number" data-meal-qty inputmode="decimal" min="0.01" max="100" step="0.01" value="${Number.isFinite(row.qty) ? esc(fmt(row.qty)) : ""}" /></div>
+        ${rows.length > 1 ? `<button type="button" class="meal-remove-row" data-meal-remove="${index}" aria-label="Remove food">×</button>` : ""}
+      </div>`;
+    }).join("");
+    body.querySelectorAll("select,input").forEach((input) => input.addEventListener("input", sync));
+    body.querySelectorAll("[data-meal-remove]").forEach((button) => button.onclick = () => {
+      readRows(); rows.splice(Number(button.dataset.mealRemove), 1); drawRows();
+    });
+    sync();
+  };
+  nameInput?.addEventListener("input", sync);
+  m.querySelector("#meal-add-row").onclick = () => {
+    readRows(); rows.push({ food_id: "", qty: 1 }); drawRows();
+    body.querySelector("[data-meal-row]:last-child select")?.focus();
+  };
+  m.querySelector("[data-close]").onclick = closeModal;
+  m.querySelector("#meal-delete")?.addEventListener("click", () => {
+    if (confirm(`Delete “${meal.name}”? Past logged foods will stay in your history.`)) deleteMeal(meal);
+  });
+  submit.onclick = async () => {
+    sync(); if (submit.disabled) return;
+    submit.disabled = true;
+    if (logging) {
+      if (!entryRows) {
+        try { entryRows = mealEntryRows(rows, date, person); }
+        catch (_) { submit.disabled = false; return toast("Couldn’t prepare this meal"); }
+        m.querySelectorAll("input,select,#meal-add-row,.meal-remove-row").forEach((control) => control.disabled = true);
+      }
+      submit.textContent = "Saving…";
+      const saved = await saveMealEntries(entryRows);
+      if (saved) { closeModal(); toast(`Logged ${meal.name} (${entryRows.length} foods)`); }
+      else {
+        submit.disabled = false; submit.textContent = "Try again";
+        status.textContent = "Save not confirmed. Retry uses the same entries, so it cannot log this meal twice.";
+      }
+    } else {
+      submit.textContent = "Saving…";
+      let saved = false;
+      try { saved = await saveMeal(nameInput.value, rows, meal); }
+      catch (_) { toast("Couldn’t save the meal — check your connection"); }
+      if (saved) { closeModal(); toast(`Saved ${nameInput.value.trim()}`); }
+      else { submit.disabled = false; submit.textContent = "Try again"; }
+    }
+  };
+  openModal(m);
+  drawRows();
+  if (!logging) setTimeout(() => nameInput.focus(), 50);
+}
+
+function openPortionSheet(food, onLogged) {
   const m = el(`<div class="modal">
     <h2>${esc(food.name)}</h2>
     <p class="muted" style="margin-top:-6px">${food.serving ? esc(food.serving) + " · " : ""}${fmt(food.net_carbs)} g net per serving</p>
@@ -1205,11 +1791,12 @@ function openPortionSheet(food) {
   m.querySelectorAll("[data-q]").forEach((b) => b.onclick = () => {
     const q = Number(b.dataset.q);
     logFood(food, q); closeModal(); pulseFood(food.id, food.net_carbs * q);
+    if (onLogged) onLogged();
   });
   m.querySelector("[data-close]").onclick = closeModal;
   m.querySelector("#addCustom").onclick = () => {
     const q = Number($("#customQty").value);
-    if (q > 0) { logFood(food, q); closeModal(); pulseFood(food.id, food.net_carbs * q); }
+    if (q > 0) { logFood(food, q); closeModal(); pulseFood(food.id, food.net_carbs * q); if (onLogged) onLogged(); }
   };
   openModal(m);
 }
@@ -1309,6 +1896,7 @@ function openVoiceReview(draft) {
   });
 
   m.querySelector("[data-close]").onclick = () => { state.voiceDraft = null; closeModal(); };
+  m._onEscape = () => { if (confirm("Discard this unsaved voice meal?")) m.querySelector("[data-close]").click(); };
   saveBtn.onclick = async () => {
     if (saveBtn.disabled) return;
     saveBtn.disabled = true;
@@ -1380,7 +1968,7 @@ function openLabelReview(draft) {
   const initialNet = window.NCCLabel.calculateNet(
     labelPrefill(fields.totalCarbs), labelPrefill(fields.fiber), labelPrefill(fields.sugarAlcohols)
   );
-  const cats = sortCats([...new Set(state.foods.map((food) => food.category).filter(Boolean))]);
+  const cats = categoryChoices();
   const m = el(`<div class="modal label-modal">
     <h2>Review scanned label</h2>
     <p class="muted label-subtitle">Nothing is saved yet · Add the food name and check each value</p>
@@ -1516,6 +2104,7 @@ function openLabelReview(draft) {
   catInput.addEventListener("input", syncChips);
 
   m.querySelector("[data-close]").onclick = () => { state.labelDraft = null; closeModal(); };
+  m._onEscape = () => { if (confirm("Discard this unsaved scanned food?")) m.querySelector("[data-close]").click(); };
   saveBtn.onclick = async () => {
     sync(false);
     if (saveBtn.disabled) return;
@@ -1724,7 +2313,7 @@ function openCategoryReorder() {
 
 function openFoodEditor(existing, returnTo) {
   const f = existing || { name: "", serving: "", net_carbs: "", category: "", favorite: false };
-  const cats = sortCats([...new Set(state.foods.map((x) => x.category).filter(Boolean))]);
+  const cats = categoryChoices();
   const m = el(`<div class="modal">
     <h2>${existing ? "Edit food" : "Add a food"}</h2>
     <div class="field"><label>Name</label>
@@ -1815,6 +2404,8 @@ function openSettings() {
 
     <div class="settings-section">
       <h3>Layout</h3>
+      <label class="check"><input type="checkbox" id="s-usual" ${usualSession().enabled ? "checked" : ""} /> Try Usual foods</label>
+      <p class="field-help">For ${esc(window.NCC_CONFIG.DISPLAY_NAME || state.person)} on this device. Turn off to restore the original Favorites layout.</p>
       <div class="stack-btns">
         <button class="wide-btn" id="s-reorder">↕&#xFE0E; Reorder categories</button>
       </div>
@@ -1843,6 +2434,7 @@ function openSettings() {
     </div>
   </div>`);
   m.querySelector("[data-close]").onclick = closeModal;
+  m.querySelector("#s-usual").onchange = (e) => setUsualPreference({ enabled: e.target.checked });
   m.querySelector("#s-save").onclick = () => {
     setTarget($("#s-target").value);
     if (state.calReady) setCalorieSettings($("#s-trackcal").checked, Number($("#s-calgoal").value) || state.calorieTarget);
@@ -1869,7 +2461,69 @@ async function setCalorieSettings(track, goal) {
 /* ============================================================
    UI wiring
    ============================================================ */
+function handleKeyboardShortcuts(event) {
+  if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
+  const target = event.target;
+  const typing = target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
+  if (modalOpen) {
+    if (event.key === "Escape") { event.preventDefault(); escapeModal(); }
+    return;
+  }
+
+  if (target === $("#foodSearch")) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (state.search) clearLogSearch({ focus: true });
+      else target.blur();
+    } else if (state.search.trim() && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      event.preventDefault(); moveSearchSelection(event.key === "ArrowDown" ? 1 : -1);
+    } else if (state.search.trim() && event.key === "Enter") {
+      event.preventDefault();
+      const food = selectedSearchFood();
+      if (!food) return;
+      if (event.shiftKey) openPortionSheet(food, () => clearLogSearch({ focus: true }));
+      else logSelectedFood(food);
+    }
+    return;
+  }
+
+  if (target === $("#foodEditorSearch") && event.key === "Escape") {
+    event.preventDefault();
+    if (state.editorSearch) { target.value = ""; target.dispatchEvent(new Event("input")); }
+    else target.blur();
+    return;
+  }
+  if (typing) return;
+
+  const foodButton = target.closest?.(".food-btn");
+  if (foodButton && event.key === "Enter" && event.shiftKey) {
+    const food = state.foods.find((item) => item.id === foodButton.dataset.food);
+    if (food) { event.preventDefault(); openPortionSheet(food); }
+    return;
+  }
+
+  const key = event.key.toLowerCase();
+  if (key === "/") {
+    event.preventDefault(); activateTab("log"); $("#foodSearch").focus();
+  } else if (key === "?") {
+    event.preventDefault(); openKeyboardHelp();
+  } else if (key === "[" || key === "]") {
+    event.preventDefault(); shiftDay(key === "[" ? -1 : 1);
+  } else if (key === "t") {
+    event.preventDefault();
+    if (state.date !== todayStr()) { state.date = todayStr(); reloadDay(); }
+  } else if (key === "l" || key === "f" || key === "m") {
+    event.preventDefault(); activateTab({ l: "log", f: "foods", m: "meals" }[key]);
+  } else if (key === "o" || key === "n" || key === "p") {
+    event.preventDefault();
+    if (key === "o") openOneOff();
+    else if (key === "n") openFoodEditor(null);
+    else openPendingList();
+  }
+}
+
 function wireUI() {
+  document.addEventListener("keydown", handleKeyboardShortcuts);
   // A Shortcut can open a new voice draft while the installed PWA is already running.
   window.addEventListener("hashchange", handleVoiceLaunch);
   window.addEventListener("hashchange", handleLabelLaunch);
@@ -1893,21 +2547,79 @@ function wireUI() {
   $("#prevDay").onclick = () => shiftDay(-1);
   $("#nextDay").onclick = () => shiftDay(1);
   $("#dateLabel").onclick = () => { if (state.date !== todayStr()) { state.date = todayStr(); reloadDay(); } };
+  $("#dayIncompleteBtn").onclick = toggleDayIncomplete;
 
   // settings
   $("#gearBtn").onclick = openSettings;
 
-  // search
-  $("#foodSearch").addEventListener("input", (e) => { state.search = e.target.value; renderFoodGrid(); });
+  // Search with an explicit, touch-sized clear button on both tabs.
+  for (const [inputId, clearId, key, render] of [
+    ["#foodSearch", "#clearFoodSearch", "search", renderFoodGrid],
+    ["#foodEditorSearch", "#clearFoodEditorSearch", "editorSearch", renderEditor],
+  ]) {
+    const input = $(inputId), clear = $(clearId);
+    const update = () => {
+      state[key] = input.value;
+      clear.classList.toggle("hidden", !input.value);
+      render();
+    };
+    input.addEventListener("input", update);
+    if (inputId === "#foodSearch") input.addEventListener("search", update);
+    clear.onclick = () => {
+      input.value = "";
+      update();
+      input.focus({ preventScroll: true });
+    };
+  }
 
   // add food
   $("#addFoodBtn").onclick = () => openFoodEditor(null);
+  $("#addMealBtn").onclick = () => openMealDialog(null);
+  $("#manageMealsBtn").onclick = () => activateTab("meals");
+  const onMealClick = (event) => {
+    const edit = event.target.closest("[data-meal-edit]");
+    const log = event.target.closest("[data-meal-log]");
+    const id = edit?.dataset.mealEdit || log?.dataset.mealLog;
+    const meal = state.meals.find((item) => item.id === id);
+    if (!meal) return;
+    if (edit) openMealDialog(meal);
+    else if (!log.disabled) openMealDialog(meal, "log");
+  };
+  $("#mealQuickList").addEventListener("click", onMealClick);
+  $("#mealEditorList").addEventListener("click", onMealClick);
+  $("#foodAlphabet").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-letter]");
+    if (!button || button.disabled) return;
+    const heading = document.getElementById(button.getAttribute("aria-controls"));
+    if (!heading) return;
+    // Dismiss the phone keyboard before jumping through filtered results.
+    $("#foodEditorSearch").blur();
+    heading.scrollIntoView({ block: "start", behavior: "instant" });
+    heading.focus({ preventScroll: true });
+  });
 
   // food grid: tap = log 1, long-press = portion sheet
   wireFoodGridGestures();
 
   // category tiles: tap to open (auto-closes the previously open one)
   $("#foodGrid").addEventListener("click", (e) => {
+    // Pointer logging happens on pointerup; native keyboard/assistive clicks have detail 0.
+    const keyboardFood = e.target.closest(".food-btn");
+    if (keyboardFood && e.detail === 0) {
+      const food = state.foods.find((item) => item.id === keyboardFood.dataset.food);
+      if (food) {
+        confirmPulse(keyboardFood, Number(food.net_carbs));
+        logFood(food, 1);
+        if (state.search.trim()) clearLogSearch({ focus: true });
+      }
+      return;
+    }
+    const mode = e.target.closest("[data-usual-mode]");
+    if (mode) {
+      setUsualPreference({ mode: mode.dataset.usualMode });
+      $(`.usual-modes [data-usual-mode="${mode.dataset.usualMode}"]`)?.focus();
+      return;
+    }
     const cb = e.target.closest(".cat-tile");
     if (cb) toggleCat(cb.dataset.cat);
   });
@@ -1998,7 +2710,9 @@ function shiftDay(delta) {
 }
 async function reloadDay() {
   renderDate();
-  try { await loadEntries(); } catch (e) { return toast("Couldn’t load that day"); }
+  state.entries = [];
+  renderEntries(); renderProgress();
+  try { await Promise.all([loadEntries(), loadDayStatus()]); } catch (e) { return toast("Couldn’t load that day"); }
   renderEntries(); renderProgress();
 }
 
@@ -2008,6 +2722,7 @@ function activateTab(name) {
   $$(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === name));
   $("#tab-log").classList.toggle("active", name === "log");
   $("#tab-foods").classList.toggle("active", name === "foods");
+  $("#tab-meals").classList.toggle("active", name === "meals");
   renderJump();
   renderMiniTally();
 }
@@ -2022,8 +2737,9 @@ function isAtBottom() {
 function setupJump() {
   const btn = $("#jumpBtn");
   btn.onclick = () => {
-    if (isAtBottom()) {
-      window.scrollTo({ top: 0, behavior: "smooth" });
+    if (state.tab === "foods" || isAtBottom()) {
+      window.scrollTo({ top: 0, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+      if (state.tab === "foods") $('.tab[data-tab="foods"]').focus({ preventScroll: true });
     } else {
       // align the top of the log just below the sticky header (not hidden under it)
       const appbarH = ($("#appbar")?.offsetHeight) || 0;
@@ -2043,23 +2759,39 @@ function setupJump() {
 function renderMiniTally() {
   const el = $("#miniTally");
   if (!el) return;
-  const show = !modalOpen && state.tab === "log" && !progVisible;
+  const show = !modalOpen && state.tab === "log" && !progVisible && !usualCardsAtBottom();
   el.classList.toggle("hidden", !show);
   if (!show) return;
   const total = dayTotal();
   const over = total > state.target;
   const pending = dayPending().length;
-  el.innerHTML = `<span class="mt-num ${over ? "over" : ""}">${fmt(total)}</span><span class="mt-of">/ ${fmt(state.target)} g${pending ? ` · ⚑ ${pending}` : ""}</span>`;
+  const { total: calories, unknown } = dayCalories();
+  const calText = unknown === state.entries.length && unknown > 0 ? "? cal" : `${fmtCal(calories)} cal${unknown ? " + ?" : ""}`;
+  el.innerHTML = `<span><span class="mt-num ${over ? "over" : ""}">${fmt(total)}</span><span class="mt-of"> g carbs</span></span>
+    <span class="mt-of">${calText}</span>${pending || dayIsIncomplete() ? `<span class="mt-status">${[pending ? `⚑ ${pending} pending` : "", dayIsIncomplete() ? "incomplete" : ""].filter(Boolean).join(" · ")}</span>` : ""}`;
+  el.title = `${fmt(total)} g net carbs eaten · ${fmtCal(calories)} known calories eaten${unknown ? ` · ${unknown} entries with unknown calories` : ""} · ${fmtDateLabel(state.date)}`;
 }
 function renderJump() {
   const btn = $("#jumpBtn");
   if (!btn) return;
   const scrollable = document.documentElement.scrollHeight > window.innerHeight + 40;
   const count = state.entries.length + dayPending().length;
-  const show = !modalOpen && state.tab === "log" && count > 0 && scrollable;
+  const foodsTop = state.tab === "foods" && window.scrollY > 180;
+  const show = !modalOpen && scrollable && (foodsTop || (state.tab === "log" && count > 0 && !usualCardsAtBottom()));
   btn.classList.toggle("hidden", !show);
   if (!show) return;
-  btn.innerHTML = isAtBottom() ? "↑ Top" : `↓ Logged <span class="jb-count">${count}</span>`;
+  const top = foodsTop || isAtBottom();
+  btn.innerHTML = top ? "↑ Top" : `↓ Logged <span class="jb-count">${count}</span>`;
+  btn.setAttribute("aria-label", top ? "Back to top" : "Jump to log");
+}
+
+// Keep the floating pills from covering the experiment's card names or tap targets.
+function usualCardsAtBottom() {
+  const grid = $(".usual-grid");
+  if (!grid) return false;
+  const rect = grid.getBoundingClientRect();
+  const safeBottom = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--safe-bottom")) || 0;
+  return rect.top < window.innerHeight && rect.bottom > window.innerHeight - safeBottom - 96;
 }
 
 /* ---------- toast / undo ---------- */
